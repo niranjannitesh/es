@@ -1,6 +1,7 @@
 # ES
 
-A toy language at the intersection of JavaScript and Elixir, with a bytecode optimised VM
+A toy language at the intersection of JavaScript and Elixir, with a bytecode optimised VM.
+This is an experiment I am doing to learn Rust
 
 ## Inspiration
 
