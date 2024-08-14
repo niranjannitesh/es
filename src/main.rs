@@ -1,4 +1,7 @@
-use std::{collections::HashMap, fmt};
+use std::{
+    collections::HashMap,
+    fmt::{self, Debug, Display},
+};
 
 #[derive(Debug)]
 enum VMError {
@@ -26,6 +29,9 @@ enum ASTNode {
     BinaryOp(Box<ASTNode>, BinaryOperator, Box<ASTNode>),
     Variable(String),
     Assignment(String, Box<ASTNode>),
+    If(Box<ASTNode>, Box<ASTNode>, Option<Box<ASTNode>>),
+    While(Box<ASTNode>, Box<ASTNode>),
+    Block(Vec<ASTNode>),
 }
 
 enum BinaryOperator {
@@ -100,6 +106,44 @@ impl BytecodeGenerator {
                 self.variables.insert(name.clone(), value_reg.clone());
                 value_reg
             }
+            ASTNode::Block(statements) => {
+                let mut last_reg = self.allocate_register();
+                for statement in statements {
+                    last_reg = self.generate(statement);
+                }
+                last_reg
+            }
+            ASTNode::If(condition, then_branch, else_branch) => {
+                let condition_reg = self.generate(condition);
+                let then_label = self.instructions.len();
+                self.instructions
+                    .push(Instruction::JmpFalse(condition_reg.clone(), 0));
+                self.generate(then_branch);
+                let end_label = self.instructions.len();
+                if let Some(else_branch) = else_branch {
+                    let else_label = self.instructions.len();
+                    self.instructions.push(Instruction::Jmp(0));
+                    self.instructions[then_label] =
+                        Instruction::JmpFalse(condition_reg.clone(), else_label + 1);
+                    self.generate(else_branch);
+                    self.instructions[else_label] = Instruction::Jmp(self.instructions.len());
+                } else {
+                    self.instructions[then_label] = Instruction::JmpFalse(condition_reg, end_label);
+                }
+                self.allocate_register()
+            }
+            ASTNode::While(condition, body) => {
+                let loop_start = self.instructions.len();
+                let condition_reg = self.generate(condition);
+                let body_start = self.instructions.len();
+                self.instructions
+                    .push(Instruction::JmpFalse(condition_reg.clone(), 0)); // reassignment_below
+                self.generate(body);
+                self.instructions.push(Instruction::Jmp(loop_start));
+                let loop_end = self.instructions.len();
+                self.instructions[body_start] = Instruction::JmpFalse(condition_reg, loop_end);
+                self.allocate_register()
+            }
         }
     }
 }
@@ -110,6 +154,17 @@ enum Value {
     Number(f64),
     Boolean(bool),
     String(String),
+}
+
+impl fmt::Display for Value {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Value::Empty => write!(f, "[empty]"),
+            Value::Boolean(v) => write!(f, "{}", v),
+            Value::Number(v) => write!(f, "{}", v),
+            Value::String(v) => write!(f, "{}", v),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -127,9 +182,10 @@ enum Instruction {
     Sub(Register, Register, Register),
     Mul(Register, Register, Register),
     Div(Register, Register, Register),
-    Jmp(Register),
-    JmpTrue(Register, Register),
-    JmpFalse(Register, Register),
+    Jmp(usize),
+    JmpFalse(Register, usize),
+    DbgPrintReg(Register),
+    DbgPrintVar(String),
 }
 
 struct Process {
@@ -158,18 +214,15 @@ impl Process {
         self.registers = vec![Value::Empty; max_registers];
     }
 
-    fn allocate_reg(&mut self) -> Register {
-        self.registers.push(Value::Empty);
-        Register {
-            index: self.registers.len() - 1,
-        }
-    }
-
     fn run_program(&mut self) -> Result<(), VMError> {
+        self.ip = 0;
         while self.ip < self.program.len() && !self.halt {
             let instruction = self.program[self.ip].clone();
             match self.execute(instruction) {
-                Ok(_) => self.dump(),
+                Ok(_) => {
+                    // self.dump();
+                    // dbg!("{}", &self.variables);
+                }
                 Err(e) => return Err(e),
             }
             self.ip += 1;
@@ -199,7 +252,9 @@ impl Process {
             Instruction::Sub(dest, reg1, reg2) => {
                 let value1 = match self.registers[reg1.index] {
                     Value::Number(val) => val,
-                    _ => return Err(VMError::TypeMisMatch(self.pid)),
+                    _ => {
+                        return Err(VMError::TypeMisMatch(self.pid));
+                    }
                 };
                 let value2 = match self.registers[reg2.index] {
                     Value::Number(val) => val,
@@ -230,37 +285,16 @@ impl Process {
                 self.registers[dest.index] = Value::Number(value1 / value2);
             }
             Instruction::Jmp(dest) => {
-                self.ip = match self.registers[dest.index] {
-                    Value::Number(x) => x as usize,
-                    _ => return Err(VMError::BadAddress(self.pid)),
-                };
-            }
-            Instruction::JmpTrue(reg, dest) => {
-                let cond = match self.registers[reg.index] {
-                    Value::Number(val) => val > 0.0,
-                    _ => false,
-                };
-                if cond {
-                    self.ip = match self.registers[dest.index] {
-                        Value::Number(x) => x as usize,
-                        _ => return Err(VMError::BadAddress(self.pid)),
-                    };
-                } else {
-                    self.ip += 1;
-                }
+                self.ip = dest;
             }
             Instruction::JmpFalse(reg, dest) => {
                 let cond = match self.registers[reg.index] {
                     Value::Number(val) => val > 0.0,
+                    Value::Boolean(val) => val,
                     _ => false,
                 };
                 if !cond {
-                    self.ip = match self.registers[dest.index] {
-                        Value::Number(x) => x as usize,
-                        _ => return Err(VMError::BadAddress(self.pid)),
-                    };
-                } else {
-                    self.ip += 1;
+                    self.ip = dest - 1;
                 }
             }
             Instruction::Store(var_name, reg) => {
@@ -273,6 +307,20 @@ impl Process {
                 } else {
                     return Err(VMError::UndefinedVariable(self.pid, var_name));
                 }
+            }
+            Instruction::DbgPrintReg(reg) => {
+                println!(
+                    "[Process #{}] r{}: {}",
+                    self.pid, reg.index, &self.registers[reg.index]
+                );
+            }
+            Instruction::DbgPrintVar(name) => {
+                println!(
+                    "[Process #{}] {}: {}",
+                    self.pid,
+                    name.clone(),
+                    self.variables.get(&name).unwrap()
+                );
             }
         }
         Ok(())
@@ -322,32 +370,67 @@ fn main() {
     let mut vm = ByteCodeVM::new();
     let process = vm.spawn();
 
-    let ast = ASTNode::BinaryOp(
-        Box::new(ASTNode::Assignment(
-            "z".to_string(),
+    let ast = ASTNode::Block(vec![
+        ASTNode::Assignment("x".to_string(), Box::new(ASTNode::Number(0.0))),
+        ASTNode::While(
             Box::new(ASTNode::BinaryOp(
-                Box::new(ASTNode::Assignment(
-                    "x".to_string(),
-                    Box::new(ASTNode::Number(20.0)),
-                )),
-                BinaryOperator::Add,
-                Box::new(ASTNode::Assignment(
-                    "y".to_string(),
-                    Box::new(ASTNode::Number(80.0)),
-                )),
+                Box::new(ASTNode::Number(5.0)),
+                BinaryOperator::Subtract,
+                Box::new(ASTNode::Variable("x".to_string())),
             )),
-        )),
-        BinaryOperator::Multiply,
-        Box::new(ASTNode::Number(2.0)),
-    );
+            Box::new(ASTNode::Block(vec![
+                ASTNode::Assignment(
+                    "x".to_string(),
+                    Box::new(ASTNode::BinaryOp(
+                        Box::new(ASTNode::Variable("x".to_string())),
+                        BinaryOperator::Add,
+                        Box::new(ASTNode::Number(1.0)),
+                    )),
+                ),
+                ASTNode::Assignment(
+                    "temp".to_string(),
+                    Box::new(ASTNode::BinaryOp(
+                        Box::new(ASTNode::Number(5.0)),
+                        BinaryOperator::Subtract,
+                        Box::new(ASTNode::Variable("x".to_string())),
+                    )),
+                ),
+            ])),
+        ),
+        ASTNode::If(
+            Box::new(ASTNode::BinaryOp(
+                Box::new(ASTNode::Variable("x".to_string())),
+                BinaryOperator::Subtract,
+                Box::new(ASTNode::Number(5.0)),
+            )),
+            Box::new(ASTNode::Assignment(
+                "result".to_string(),
+                Box::new(ASTNode::Number(1.0)),
+            )),
+            Some(Box::new(ASTNode::Assignment(
+                "result".to_string(),
+                Box::new(ASTNode::Number(0.0)),
+            ))),
+        ),
+    ]);
 
     let mut generator = BytecodeGenerator::new();
     generator.generate(&ast);
 
+    generator
+        .instructions
+        .push(Instruction::DbgPrintVar("x".to_string()));
+    generator
+        .instructions
+        .push(Instruction::DbgPrintVar("result".to_string()));
+
     process.load_program(generator.instructions, generator.next_register);
     match process.run_program() {
         Ok(_) => {
-            dbg!("variables: {}", generator.next_register);
+            println!("variable states:");
+            for (name, value) in &process.variables {
+                println!("\t {}: {}", name, value);
+            }
         }
         Err(err) => eprintln!("{}", err),
     }
