@@ -25,7 +25,8 @@ impl fmt::Display for VMError {
 }
 
 enum ASTNode {
-    Number(f64),
+    StringLiteral(String),
+    NumberLiteral(f64),
     BinaryOp(Box<ASTNode>, BinaryOperator, Box<ASTNode>),
     Variable(String),
     Assignment(String, Box<ASTNode>),
@@ -66,10 +67,18 @@ impl BytecodeGenerator {
 
     fn generate(&mut self, node: &ASTNode) -> Register {
         match node {
-            ASTNode::Number(value) => {
+            ASTNode::NumberLiteral(value) => {
                 let reg = self.allocate_register();
                 self.instructions
                     .push(Instruction::Load(reg.clone(), Value::Number(*value)));
+                reg
+            }
+            ASTNode::StringLiteral(string) => {
+                let reg = self.allocate_register();
+                self.instructions.push(Instruction::Load(
+                    reg.clone(),
+                    Value::String(string.clone()),
+                ));
                 reg
             }
             ASTNode::BinaryOp(left, op, right) => {
@@ -239,15 +248,20 @@ impl Process {
                 self.registers[reg.index] = value;
             }
             Instruction::Add(dest, reg1, reg2) => {
-                let value1 = match self.registers[reg1.index] {
-                    Value::Number(val) => val,
+                let value1 = &self.registers[reg1.index];
+                let value2 = &self.registers[reg2.index];
+                match (value1, value2) {
+                    (Value::Number(v1), Value::Number(v2)) => {
+                        self.registers[dest.index] = Value::Number(v1 + v2);
+                    }
+                    (Value::String(s1), Value::String(s2)) => {
+                        self.registers[dest.index] = Value::String(s1.clone() + s2);
+                    }
+                    (Value::String(s), Value::Number(n)) | (Value::Number(n), Value::String(s)) => {
+                        self.registers[dest.index] = Value::String(s.clone() + &n.to_string());
+                    }
                     _ => return Err(VMError::TypeMisMatch(self.pid)),
-                };
-                let value2 = match self.registers[reg2.index] {
-                    Value::Number(val) => val,
-                    _ => return Err(VMError::TypeMisMatch(self.pid)),
-                };
-                self.registers[dest.index] = Value::Number(value1 + value2);
+                }
             }
             Instruction::Sub(dest, reg1, reg2) => {
                 let value1 = match self.registers[reg1.index] {
@@ -371,10 +385,10 @@ fn main() {
     let process = vm.spawn();
 
     let ast = ASTNode::Block(vec![
-        ASTNode::Assignment("x".to_string(), Box::new(ASTNode::Number(0.0))),
+        ASTNode::Assignment("x".to_string(), Box::new(ASTNode::NumberLiteral(0.0))),
         ASTNode::While(
             Box::new(ASTNode::BinaryOp(
-                Box::new(ASTNode::Number(5.0)),
+                Box::new(ASTNode::NumberLiteral(5.0)),
                 BinaryOperator::Subtract,
                 Box::new(ASTNode::Variable("x".to_string())),
             )),
@@ -384,13 +398,13 @@ fn main() {
                     Box::new(ASTNode::BinaryOp(
                         Box::new(ASTNode::Variable("x".to_string())),
                         BinaryOperator::Add,
-                        Box::new(ASTNode::Number(1.0)),
+                        Box::new(ASTNode::NumberLiteral(1.0)),
                     )),
                 ),
                 ASTNode::Assignment(
                     "temp".to_string(),
                     Box::new(ASTNode::BinaryOp(
-                        Box::new(ASTNode::Number(5.0)),
+                        Box::new(ASTNode::NumberLiteral(5.0)),
                         BinaryOperator::Subtract,
                         Box::new(ASTNode::Variable("x".to_string())),
                     )),
@@ -401,16 +415,32 @@ fn main() {
             Box::new(ASTNode::BinaryOp(
                 Box::new(ASTNode::Variable("x".to_string())),
                 BinaryOperator::Subtract,
-                Box::new(ASTNode::Number(5.0)),
+                Box::new(ASTNode::NumberLiteral(5.0)),
             )),
             Box::new(ASTNode::Assignment(
                 "result".to_string(),
-                Box::new(ASTNode::Number(1.0)),
+                Box::new(ASTNode::NumberLiteral(1.0)),
             )),
             Some(Box::new(ASTNode::Assignment(
                 "result".to_string(),
-                Box::new(ASTNode::Number(0.0)),
+                Box::new(ASTNode::NumberLiteral(0.0)),
             ))),
+        ),
+        ASTNode::Assignment(
+            "hello".to_string(),
+            Box::new(ASTNode::StringLiteral("hello ".to_string())),
+        ),
+        ASTNode::Assignment(
+            "world".to_string(),
+            Box::new(ASTNode::StringLiteral("world".to_string())),
+        ),
+        ASTNode::Assignment(
+            "str".to_string(),
+            Box::new(ASTNode::BinaryOp(
+                Box::new(ASTNode::Variable("hello".to_string())),
+                BinaryOperator::Add,
+                Box::new(ASTNode::Variable("world".to_string())),
+            )),
         ),
     ]);
 
@@ -423,6 +453,9 @@ fn main() {
     generator
         .instructions
         .push(Instruction::DbgPrintVar("result".to_string()));
+    generator
+        .instructions
+        .push(Instruction::DbgPrintVar("str".to_string()));
 
     process.load_program(generator.instructions, generator.next_register);
     match process.run_program() {
